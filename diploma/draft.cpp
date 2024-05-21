@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iomanip>
 #include "utils.hpp"
+#include "omp.h"
 
 using namespace cv;
 
@@ -21,10 +22,10 @@ int m_cannyThreshold2 = 300;
 double m_minPositivesDistance;
 double m_deltaRotationAngle = PI / 48;
 double m_minRotationAngle = 0;
-double m_maxRotationAngle = 1.5708;
-double m_deltaScaleRatio = 0.5;
-double m_minScaleRatio = 1;
-double m_maxScaleRatio = 3;
+double m_maxRotationAngle = 1;
+double m_deltaScaleRatio = 0.1;
+double m_minScaleRatio = 0.7;
+double m_maxScaleRatio = 1.5;
 int m_nScales = (m_maxScaleRatio - m_minScaleRatio) / m_deltaScaleRatio + 1;
 int m_nRotations = (m_maxRotationAngle - m_minRotationAngle) / m_deltaRotationAngle + 1;
 int m_nSlices = (2.0 * PI) / m_deltaRotationAngle;
@@ -40,7 +41,7 @@ struct GHTPoint
 void findOrigin()
 {
     m_origin = Vec2f(m_templateImage.cols / 2, m_templateImage.rows / 2); // By default, the origin is at the center
-    std::cout << m_origin;
+    // std::cout << m_origin;
 }
 
 Mat gradientDirection(const Mat &src)
@@ -95,7 +96,7 @@ void createRTable()
                 m_RTable[iSlice].push_back(Vec2f(m_origin[0] - x, m_origin[1] - y));
             }
         }
-        std::cout << std::endl;
+        // std::cout << std::endl;
     }
 }
 
@@ -158,6 +159,26 @@ void drawTemplate(Mat &image, GHTPoint params)
     cv::rectangle(image, rect, cv::Scalar{0, 0, 255, 255}, 3);
 }
 
+struct RefPoint
+{
+    size_t x;
+    size_t y;
+    size_t score;
+    size_t rotate_index;
+    size_t scale_index;
+    size_t scale;
+    size_t rotate;
+};
+
+void drawTemplate(const Mat &image, RefPoint params)
+{
+    int x(0), y(0), relx(0), rely(0);
+
+    cv::Rect rect{params.x - (m_templateImage.rows / 2), params.y - (m_templateImage.cols / 2), 54, 57};
+    cv::rectangle(image, rect, cv::Scalar{0, 0, 255, 255}, 3);
+    imshow("RESULT", image);
+}
+
 void accumulate(const Mat &image)
 {
     Mat grayImage(image.size(), CV_8UC1), edges(image.size(), CV_8UC1);
@@ -179,38 +200,28 @@ void accumulate(const Mat &image)
     int S = ceil((m_maxScaleRatio - m_minScaleRatio) / m_deltaScaleRatio) + 1; // Scale Slices Number
     int R = ceil((m_maxRotationAngle - m_minRotationAngle) / m_deltaRotationAngle) + 1;
 
-    vector<vector<Mat>> showAccum(R, vector<Mat>(S, Mat::zeros(Size(X, Y), CV_8UC1)));
+    vector<vector<Mat>> accum(R, vector<Mat>(S, Mat::zeros(Size(X, Y), CV_64F)));
 
-    // for (double angle = m_minRotationAngle; angle <= m_maxRotationAngle + 0.0001; angle += m_deltaRotationAngle)
-    // {
-    //     auto iRotationSlice = round((angle - m_minRotationAngle) / m_deltaRotationAngle);
+    vector<RefPoint> points = {};
+    size_t global_max_score = 0;
 
-    // for (double angle = m_minRotationAngle; angle <= m_maxRotationAngle + 0.0001; angle += m_deltaRotationAngle)
-    // {
-    //     // double max = 0;
-    //     GHTPoint point;
-    //     auto iRotationSlice = round((angle - m_minRotationAngle) / m_deltaRotationAngle);
-    //     cout << "Rotation Angle\t: " << angle / PI * 180 << "�" << endl;
-    //     TransformedRTable = rotateRTable(m_RTable, angle - m_minRotationAngle, m_nSlices);
-    //     size_t max = 0;
-    //     size_t max_yc = 0;
-    //     size_t max_xc = 0;
-    //     size_t max_r = 0;
-    for (double angle = m_minRotationAngle; angle <= m_maxRotationAngle + 0.0001; angle += m_deltaRotationAngle)
+    for (size_t step = 0; step < R; step++)
     {
+        double angle = m_minRotationAngle + step * m_deltaRotationAngle + 0.0001;
         size_t iRotationSlice = round((angle - m_minRotationAngle) / m_deltaRotationAngle);
         TransformedRTable = rotateRTable(m_RTable, angle, m_nSlices);
 
-        // TransformedRTable = m_RTable;
+        size_t max = 0;
+        size_t max2 = 0;
+        size_t max_yc = 0;
+        size_t max_xc = 0;
+        size_t max_r = 0;
+
         for (double ratio = m_minScaleRatio; ratio <= m_maxScaleRatio + 0.0001; ratio += m_deltaScaleRatio)
         {
-            size_t max = 0;
-            size_t max_yc = 0;
-            size_t max_xc = 0;
-            size_t max_r = 0;
-
             size_t iScaleSlice = round((ratio - m_minScaleRatio) / m_deltaScaleRatio);
             TransformedRTable = scaleRTable(TransformedRTable, ratio);
+            accum[iRotationSlice][iScaleSlice] = Mat::zeros(Size(X, Y), CV_64F);
 
             for (size_t y = 0; y < Y; y++)
             {
@@ -231,12 +242,21 @@ void accumulate(const Mat &image)
 
                             if (xc >= 0 && xc < image.cols && yc >= 0 && yc < image.rows)
                             {
-                                showAccum[iRotationSlice][iScaleSlice].at<uchar>(yc, xc)++;
-                                if (showAccum[iRotationSlice][iScaleSlice].at<uchar>(yc, xc) > max)
+                                if (++accum[iRotationSlice][iScaleSlice].at<double>(yc, xc) >= global_max_score)
                                 {
-                                    max = showAccum[iRotationSlice][iScaleSlice].at<uchar>(yc, xc);
+                                    max2 = accum[iRotationSlice][iScaleSlice].at<double>(yc, xc);
+                                    global_max_score = max2;
                                     max_yc = yc;
                                     max_xc = xc;
+                                    RefPoint point;
+                                    point.x = xc;
+                                    point.y = yc;
+                                    point.score = max2;
+                                    point.scale = ratio * 100;
+                                    point.rotate = angle / PI * 180;
+                                    point.rotate_index = iRotationSlice;
+                                    point.scale_index = iScaleSlice;
+                                    points.push_back(point);
                                 }
                             }
                         }
@@ -244,21 +264,25 @@ void accumulate(const Mat &image)
                     }
                 }
             }
-            std::cout << "Наибольший элемент: " << max << std::endl;
-            std::cout << "Позиция наибольшего элемента: " << max_yc << ", " << max_xc << std::endl;
-            // normalize(showAccum, showAccum, 0, 255, NORM_MINMAX, CV_8UC1); // To see each transformation accumulation (uncomment line 159 : "max = 0")
-
-            // Вывод результатов
-
-            // }
         }
-        //     std::cout << "Наибольший элемент: " << max << std::endl;
-        //     std::cout << "Позиция наибольшего элемента: " << max_yc << ", " << max_xc << std::endl;
-        //     // std::cout << "ScaleIndex: " << iScaleSlice << '\n';
-        //     // imshow("FUCKYEAH", showAccum[iRotationSlice][iScaleSlice]);
-        //     std::cout << max_r << '\n';
-        // }
     }
+
+    struct pred
+    {
+        bool operator()(const RefPoint &dot1, const RefPoint &dot2)
+        {
+            return dot1.score < dot2.score;
+        }
+    };
+
+    std::sort(points.begin(), points.end(), pred());
+
+    for (auto point : points)
+    {
+        std::cout << "X: " << point.x << "\tY: " << point.y << "\tRotate: " << point.rotate_index << "\tScale: " << point.scale_index << "\tScore: " << point.score << '\n';
+    }
+
+    drawTemplate(image, points.back());
 }
 
 int main(int argc, char **argv)
