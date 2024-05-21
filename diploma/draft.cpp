@@ -181,7 +181,7 @@ void drawTemplate(const Mat &image, RefPoint params)
 
 void accumulate(const Mat &image)
 {
-    Mat grayImage(image.size(), CV_8UC1), edges(image.size(), CV_8UC1);
+    Mat edges;
     cvtColor(image, edges, COLOR_BGR2GRAY);
     blur(edges, edges, Size(3, 3));
     Canny(edges, edges, m_cannyThreshold1, m_cannyThreshold2);
@@ -195,33 +195,33 @@ void accumulate(const Mat &image)
 
     Mat out(image.size(), image.type());
     image.copyTo(out);
-    vector<vector<Vec2f>> TransformedRTable(m_RTable.size()), RTableScaled(m_RTable.size());
 
     int S = ceil((m_maxScaleRatio - m_minScaleRatio) / m_deltaScaleRatio) + 1; // Scale Slices Number
     int R = ceil((m_maxRotationAngle - m_minRotationAngle) / m_deltaRotationAngle) + 1;
 
     vector<vector<Mat>> accum(R, vector<Mat>(S, Mat::zeros(Size(X, Y), CV_64F)));
 
-    vector<RefPoint> points = {};
+    vector<RefPoint> points;
     size_t global_max_score = 0;
+    auto start = std::chrono::high_resolution_clock::now();
 
+#pragma omp parallel for schedule(dynamic) shared(points, accum, global_max_score)
     for (size_t step = 0; step < R; step++)
     {
+        vector<RefPoint> local_points;
+        size_t local_max_score = 0;
+
         double angle = m_minRotationAngle + step * m_deltaRotationAngle + 0.0001;
         size_t iRotationSlice = round((angle - m_minRotationAngle) / m_deltaRotationAngle);
+        vector<vector<Vec2f>> TransformedRTable(m_RTable.size()), RTableScaled(m_RTable.size());
         TransformedRTable = rotateRTable(m_RTable, angle, m_nSlices);
-
-        size_t max = 0;
-        size_t max2 = 0;
-        size_t max_yc = 0;
-        size_t max_xc = 0;
-        size_t max_r = 0;
 
         for (double ratio = m_minScaleRatio; ratio <= m_maxScaleRatio + 0.0001; ratio += m_deltaScaleRatio)
         {
             size_t iScaleSlice = round((ratio - m_minScaleRatio) / m_deltaScaleRatio);
             TransformedRTable = scaleRTable(TransformedRTable, ratio);
             accum[iRotationSlice][iScaleSlice] = Mat::zeros(Size(X, Y), CV_64F);
+            Mat localAccum = Mat::zeros(Size(X, Y), CV_64F);
 
             for (size_t y = 0; y < Y; y++)
             {
@@ -242,30 +242,35 @@ void accumulate(const Mat &image)
 
                             if (xc >= 0 && xc < image.cols && yc >= 0 && yc < image.rows)
                             {
-                                if (++accum[iRotationSlice][iScaleSlice].at<double>(yc, xc) >= global_max_score)
+#pragma omp atomic
+                                ++accum[iRotationSlice][iScaleSlice].at<double>(yc, xc);
+#pragma omp critical
                                 {
-                                    max2 = accum[iRotationSlice][iScaleSlice].at<double>(yc, xc);
-                                    global_max_score = max2;
-                                    max_yc = yc;
-                                    max_xc = xc;
-                                    RefPoint point;
-                                    point.x = xc;
-                                    point.y = yc;
-                                    point.score = max2;
-                                    point.scale = ratio * 100;
-                                    point.rotate = angle / PI * 180;
-                                    point.rotate_index = iRotationSlice;
-                                    point.scale_index = iScaleSlice;
-                                    points.push_back(point);
+                                    if (accum[iRotationSlice][iScaleSlice].at<double>(yc, xc) >= local_max_score)
+                                    {
+                                        local_max_score = accum[iRotationSlice][iScaleSlice].at<double>(yc, xc);
+                                        RefPoint point;
+                                        point.x = xc;
+                                        point.y = yc;
+                                        point.score = local_max_score;
+                                        point.scale = ratio * 100;
+                                        point.rotate = angle / PI * 180;
+                                        point.rotate_index = iRotationSlice;
+                                        point.scale_index = iScaleSlice;
+                                        points.push_back(point);
+                                    }
                                 }
                             }
                         }
-                        max_r += r_count;
                     }
                 }
             }
         }
     }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::milliseconds duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << "Время выполнения: " << duration.count() << " миллисекунд." << std::endl;
 
     struct pred
     {
@@ -277,10 +282,10 @@ void accumulate(const Mat &image)
 
     std::sort(points.begin(), points.end(), pred());
 
-    for (auto point : points)
-    {
-        std::cout << "X: " << point.x << "\tY: " << point.y << "\tRotate: " << point.rotate_index << "\tScale: " << point.scale_index << "\tScore: " << point.score << '\n';
-    }
+    // for (auto point : points)
+    // {
+    //     std::cout << "X: " << point.x << "\tY: " << point.y << "\tRotate: " << point.rotate_index << "\tScale: " << point.scale_index << "\tScore: " << point.score << '\n';
+    // }
 
     drawTemplate(image, points.back());
 }
