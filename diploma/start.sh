@@ -1,5 +1,5 @@
 #!/bin/bash
 
 make clean
-
-make test  
+rm test_parallel
+make test_parallel

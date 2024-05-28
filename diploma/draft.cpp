@@ -300,6 +300,6 @@ int main(int argc, char **argv)
     Mat source = imread("letters.png");
     imshow("source", source);
     accumulate(source);
-    cv::waitKey(0);
+    // cv::waitKey(0);
     return 0;
 }

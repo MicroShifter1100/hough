@@ -19,7 +19,7 @@ const double PI = 4.0 * std::atan(1.0);
 int m_cannyThreshold1 = 300;
 int m_cannyThreshold2 = 300;
 double m_minPositivesDistance;
-double m_deltaRotationAngle = PI / 48;
+double m_deltaRotationAngle = PI / 96;
 double m_minRotationAngle = 0;
 double m_maxRotationAngle = 1;
 double m_deltaScaleRatio = 0.1;
@@ -202,9 +202,13 @@ void accumulate(const Mat &image)
     vector<vector<Mat>> accum(R, vector<Mat>(S, Mat::zeros(Size(X, Y), CV_64F)));
 
     vector<RefPoint> points = {};
+    size_t global_max_score = 0;
+    auto start = std::chrono::high_resolution_clock::now();
 
-    for (double angle = m_minRotationAngle; angle <= m_maxRotationAngle + 0.0001; angle += m_deltaRotationAngle)
+    for (size_t step = 0; step < R; step++)
     {
+        // std::cout << R << '\n';
+        double angle = m_minRotationAngle + step * m_deltaRotationAngle + 0.0001;
         size_t iRotationSlice = round((angle - m_minRotationAngle) / m_deltaRotationAngle);
         TransformedRTable = rotateRTable(m_RTable, angle, m_nSlices);
 
@@ -239,9 +243,10 @@ void accumulate(const Mat &image)
 
                             if (xc >= 0 && xc < image.cols && yc >= 0 && yc < image.rows)
                             {
-                                if (++accum[iRotationSlice][iScaleSlice].at<double>(yc, xc) >= max2)
+                                if (++accum[iRotationSlice][iScaleSlice].at<double>(yc, xc) >= global_max_score)
                                 {
                                     max2 = accum[iRotationSlice][iScaleSlice].at<double>(yc, xc);
+                                    global_max_score = max2;
                                     max_yc = yc;
                                     max_xc = xc;
                                     RefPoint point;
@@ -263,6 +268,10 @@ void accumulate(const Mat &image)
         }
     }
 
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::milliseconds duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    std::cout << "Время выполнения: " << duration.count() << " миллисекунд." << std::endl;
+
     struct pred
     {
         bool operator()(const RefPoint &dot1, const RefPoint &dot2)
@@ -273,10 +282,14 @@ void accumulate(const Mat &image)
 
     std::sort(points.begin(), points.end(), pred());
 
-    for (auto point : points)
-    {
-        std::cout << "X: " << point.x << "\tY: " << point.y << "\tRotate: " << point.rotate_index << "\tScale: " << point.scale_index << "\tScore: " << point.score << '\n';
-    }
+    // for (auto point : points)
+    // {
+    //     std::cout << "X: " << point.x << "\tY: " << point.y << "\tRotate: " << point.rotate << "\tScale: " << point.scale << "\tScore: " << point.score << '\n';
+    // }
+
+    Mat showAccum2(Size(X, Y), CV_8UC1);
+    normalize(accum[points.back().rotate_index][points.back().scale_index], showAccum2, 0, 255, NORM_MINMAX, CV_8UC1); // To see each transformation accumulation (uncomment line 159 : "max = 0")
+    imshow("ACCUM", showAccum2);
 
     drawTemplate(image, points.back());
 }

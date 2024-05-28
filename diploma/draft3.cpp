@@ -206,7 +206,7 @@ void accumulate(const Mat &image)
 
     auto start = std::chrono::high_resolution_clock::now();
 
-#pragma omp parallel for schedule(dynamic) shared(points, accum, global_max_score)
+#pragma omp parallel for schedule(dynamic) shared(accum, m_minScaleRatio, m_minRotationAngle, m_RTable, m_deltaScaleRatio, R)
     for (size_t step = 0; step < R; step++)
     {
         vector<RefPoint> local_points = {};
@@ -215,14 +215,12 @@ void accumulate(const Mat &image)
         size_t iRotationSlice = round((angle - m_minRotationAngle) / m_deltaRotationAngle);
         vector<vector<Vec2f>> TransformedRTable(m_RTable.size()), RTableScaled(m_RTable.size());
         TransformedRTable = rotateRTable(m_RTable, angle, m_nSlices);
-
         for (double ratio = m_minScaleRatio; ratio <= m_maxScaleRatio + 0.0001; ratio += m_deltaScaleRatio)
         {
             size_t iScaleSlice = round((ratio - m_minScaleRatio) / m_deltaScaleRatio);
             TransformedRTable = scaleRTable(TransformedRTable, ratio);
             // accum[iRotationSlice][iScaleSlice] = Mat::zeros(Size(X, Y), CV_64F);
             Mat localAccum = Mat::zeros(Size(X, Y), CV_64F);
-
             for (size_t y = 0; y < Y; y++)
             {
                 for (size_t x = 0; x < X; x++)
@@ -232,11 +230,8 @@ void accumulate(const Mat &image)
                     if (phi != 0.0)
                     {
                         size_t index = rad2SliceIndex(phi, m_nSlices);
-
-                        size_t r_count = 0;
                         for (auto r : TransformedRTable[index])
                         {
-                            r_count++;
                             int xc = x + r[0];
                             int yc = y + r[1];
 
@@ -244,10 +239,7 @@ void accumulate(const Mat &image)
                             {
                                 if (++localAccum.at<double>(yc, xc) >= local_max_score)
                                 {
-                                    // max2 = accum[iRotationSlice][iScaleSlice].at<double>(yc, xc);
                                     local_max_score = localAccum.at<double>(yc, xc);
-                                    // max_yc = yc;
-                                    // max_xc = xc;
                                     RefPoint point;
                                     point.x = xc;
                                     point.y = yc;
@@ -257,7 +249,6 @@ void accumulate(const Mat &image)
                                     point.rotate_index = iRotationSlice;
                                     point.scale_index = iScaleSlice;
                                     local_points.push_back(point);
-                                    // points.push_back(point);
                                 }
                             }
                         }
@@ -265,14 +256,14 @@ void accumulate(const Mat &image)
                 }
             }
 
+            accum[iRotationSlice][iScaleSlice] = localAccum;
+        }
 #pragma omp critical
-            {
-                accum[iRotationSlice][iScaleSlice].copyTo(localAccum);
+        {
 
-                for (auto local_point : local_points)
-                {
-                    points.push_back(local_point);
-                }
+            for (const auto &local_point : local_points)
+            {
+                points.push_back(local_point);
             }
         }
     }
